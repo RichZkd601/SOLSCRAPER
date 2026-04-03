@@ -1,35 +1,31 @@
 import { Router } from 'express';
 import { db } from '../database/db';
-import { addWallet, removeWallet, backfillWallet, refreshWalletStats } from '../services/walletTracker';
+import { addWallet, removeWallet, backfillWallet } from '../services/walletTracker';
 import { getWalletPortfolio, getTopTraders, getWalletPnl, getTrendingTokens, getNewTokens } from '../services/birdeye';
 import { upsertCopyTradeConfig, getCopyTradeConfig } from '../services/copyTrade';
-import type { TrackedWallet } from '../types';
+import { getSolPrice } from '../services/jupiter';
+import { config, getTierSolAmount, eurToSol } from '../config';
 
 export const walletsRouter = Router();
 
-// ─── GET /api/wallets — list all tracked wallets ──────────────────────────────
+// ─── GET /api/wallets ─────────────────────────────────────────────────────────
 walletsRouter.get('/', (_req, res) => {
   const wallets = db.prepare('SELECT * FROM tracked_wallets ORDER BY total_pnl_usd DESC').all();
   res.json({ success: true, data: wallets });
 });
 
-// ─── POST /api/wallets — add a wallet to track ────────────────────────────────
+// ─── POST /api/wallets ────────────────────────────────────────────────────────
 walletsRouter.post('/', async (req, res) => {
   const { address, label = '', tags = [] } = req.body as { address: string; label?: string; tags?: string[] };
   if (!address || address.length < 32) {
-    res.status(400).json({ success: false, error: 'Invalid wallet address' });
+    res.status(400).json({ success: false, error: 'Adresse Solana invalide' });
     return;
   }
   try {
-    db.prepare(`
-      INSERT OR IGNORE INTO tracked_wallets (address, label, tags)
-      VALUES (?, ?, ?)
-    `).run(address, label, JSON.stringify(tags));
+    db.prepare(`INSERT OR IGNORE INTO tracked_wallets (address, label, tags) VALUES (?, ?, ?)`
+    ).run(address, label, JSON.stringify(tags));
     addWallet(address);
-
-    // Backfill in background
     backfillWallet(address, 100).catch(console.error);
-
     const wallet = db.prepare('SELECT * FROM tracked_wallets WHERE address = ?').get(address);
     res.json({ success: true, data: wallet });
   } catch (err) {
@@ -37,21 +33,19 @@ walletsRouter.post('/', async (req, res) => {
   }
 });
 
-// ─── PATCH /api/wallets/:address — update label/tags/active ──────────────────
+// ─── PATCH /api/wallets/:address ──────────────────────────────────────────────
 walletsRouter.patch('/:address', (req, res) => {
   const { address } = req.params;
   const { label, tags, isActive } = req.body as { label?: string; tags?: string[]; isActive?: boolean };
   const updates: string[] = [];
   const params: (string | number)[] = [];
-  if (label !== undefined) { updates.push('label = ?'); params.push(label); }
-  if (tags !== undefined)  { updates.push('tags = ?'); params.push(JSON.stringify(tags)); }
+  if (label !== undefined)    { updates.push('label = ?');     params.push(label); }
+  if (tags !== undefined)     { updates.push('tags = ?');      params.push(JSON.stringify(tags)); }
   if (isActive !== undefined) {
-    updates.push('is_active = ?');
-    params.push(isActive ? 1 : 0);
-    if (!isActive) removeWallet(address);
-    else addWallet(address);
+    updates.push('is_active = ?'); params.push(isActive ? 1 : 0);
+    if (!isActive) removeWallet(address); else addWallet(address);
   }
-  if (updates.length === 0) { res.status(400).json({ success: false, error: 'Nothing to update' }); return; }
+  if (!updates.length) { res.status(400).json({ success: false, error: 'Rien à mettre à jour' }); return; }
   params.push(address);
   db.prepare(`UPDATE tracked_wallets SET ${updates.join(', ')}, updated_at = datetime('now') WHERE address = ?`).run(...params);
   res.json({ success: true });
@@ -79,11 +73,11 @@ walletsRouter.get('/:address/pnl', async (req, res) => {
 
 // ─── GET /api/wallets/:address/transactions ───────────────────────────────────
 walletsRouter.get('/:address/transactions', (req, res) => {
-  const { limit = 50, offset = 0 } = req.query as { limit?: string; offset?: string };
+  const { limit = '50', offset = '0' } = req.query as { limit?: string; offset?: string };
   const txs = db.prepare(`
     SELECT * FROM transactions WHERE wallet_address = ?
     ORDER BY block_time DESC LIMIT ? OFFSET ?
-  `).all(req.params.address, parseInt(limit as string), parseInt(offset as string));
+  `).all(req.params.address, parseInt(limit), parseInt(offset));
   res.json({ success: true, data: txs });
 });
 
@@ -105,19 +99,36 @@ walletsRouter.put('/:address/copy-config', (req, res) => {
   res.json({ success: true });
 });
 
-// ─── GET /api/wallets/discover/top-traders ────────────────────────────────────
+// ─── GET /api/wallets/discover/top-traders ───────────────────────────────────
 walletsRouter.get('/discover/top-traders', async (req, res) => {
-  const { timeframe = '7d', sortBy = 'pnl', limit = 50 } = req.query as {
+  const {
+    timeframe = '7d',
+    sortBy = 'pnl',
+    limit = '100',
+    minVolume,
+    maxActivity,
+    onlyPassingFilters,
+  } = req.query as {
     timeframe?: '24h' | '7d' | '30d';
     sortBy?: 'pnl' | 'winRate' | 'volume';
     limit?: string;
+    minVolume?: string;
+    maxActivity?: string;
+    onlyPassingFilters?: string;
   };
-  const traders = await getTopTraders({ timeframe, sortBy, limit: parseInt(limit as string) });
-  // Annotate with "already tracked" flag
-  const tracked = new Set(
-    (db.prepare('SELECT address FROM tracked_wallets').all() as { address: string }[]).map(w => w.address)
-  );
-  const result = traders.map(t => ({ ...t, isTracked: tracked.has(t.address) }));
+
+  const traders = await getTopTraders({
+    timeframe,
+    sortBy,
+    limit: parseInt(limit),
+    minDailyVolumeUsd:    minVolume  ? parseFloat(minVolume)  : undefined,
+    maxLastActivityHours: maxActivity ? parseInt(maxActivity) : undefined,
+  });
+
+  const result = onlyPassingFilters === 'true'
+    ? traders.filter(t => t.passesFilters)
+    : traders;
+
   res.json({ success: true, data: result });
 });
 
@@ -131,4 +142,33 @@ walletsRouter.get('/discover/trending', async (_req, res) => {
 walletsRouter.get('/discover/new-tokens', async (_req, res) => {
   const tokens = await getNewTokens(20);
   res.json({ success: true, data: tokens });
+});
+
+// ─── GET /api/config — app config for frontend ────────────────────────────────
+walletsRouter.get('/app/config', async (_req, res) => {
+  const solPrice = await getSolPrice();
+  const solEurRate = solPrice; // approx (USD ≈ EUR pour simplifier, ajustable)
+
+  res.json({
+    success: true,
+    data: {
+      budgetEur:          config.budgetEur,
+      basePositionEur:    config.basePositionEur,
+      solEurRate,
+      tiers: [
+        getTierSolAmount(60, solEurRate),
+        getTierSolAmount(77, solEurRate),
+        getTierSolAmount(90, solEurRate),
+      ],
+      filters: {
+        minDailyVolumeUsd:    config.minDailyVolumeUsd,
+        maxLastActivityHours: config.maxLastActivityHours,
+        minLiquidityUsd:      config.minLiquidityUsd,
+      },
+      slippage: config.slippage,
+      hasTraderWallet: !!config.traderPrivateKey,
+      hasBirdeye:  !!config.birdeyeApiKey,
+      hasHelius:   !!config.heliusApiKey,
+    },
+  });
 });
