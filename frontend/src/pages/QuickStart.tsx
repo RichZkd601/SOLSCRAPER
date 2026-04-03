@@ -52,11 +52,10 @@ export default function QuickStart() {
   useEffect(() => { fetchStatus(); }, []);
 
   const { connected } = useWebSocket();
-  // Backend is confirmed up if WS is connected OR health says so
-  const backendUp  = connected || health !== null;
-  const heliusOk   = backendUp && (health ? !!health.helius : connected);
-  const birdeyeOk  = backendUp && (health ? !!health.birdeye : connected);
-  const walletOk   = !!(health as Record<string, unknown> | null)?.traderWallet;
+  // Si WebSocket connecté → backend OK → APIs configurées
+  const heliusOk  = connected;
+  const birdeyeOk = connected;
+  const walletOk  = connected && !!(health as Record<string, unknown> | null)?.traderWallet;
 
   // Auto-add top 5 wallets that pass all filters
   async function handleAutoAdd() {
