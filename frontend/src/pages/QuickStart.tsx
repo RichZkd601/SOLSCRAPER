@@ -1,303 +1,259 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { CheckCircle, Circle, Zap, Wallet, Copy, ArrowRight, RefreshCw, ExternalLink } from 'lucide-react';
+import { CheckCircle, Circle, Zap, Wallet, Copy, ArrowRight, RefreshCw, ExternalLink, AlertCircle } from 'lucide-react';
 import { clsx } from 'clsx';
-import { healthApi, walletsApi, discoverApi } from '../services/api';
+import { walletsApi, discoverApi } from '../services/api';
 import { useWebSocket } from '../hooks/useWebSocket';
-
-interface Step {
-  id: number;
-  title: string;
-  desc: string;
-  done: boolean;
-  action?: () => void;
-  actionLabel?: string;
-  link?: string;
-  linkLabel?: string;
-}
-
-interface AppConfig {
-  budgetEur: number;
-  basePositionEur: number;
-  solEurRate: number;
-  tiers: Array<{ tier: number; eur: number; sol: number; label: string }>;
-  filters: { minDailyVolumeUsd: number; maxLastActivityHours: number; minLiquidityUsd: number };
-  slippage: { highLiquidity: number; medLiquidity: number; lowLiquidity: number; highLiqThreshold: number; medLiqThreshold: number };
-  hasTraderWallet: boolean;
-  hasBirdeye: boolean;
-  hasHelius: boolean;
-}
 
 export default function QuickStart() {
   const navigate = useNavigate();
-  const [health, setHealth] = useState<Record<string, unknown> | null>(null);
-  const [appConfig, setAppConfig] = useState<AppConfig | null>(null);
-  const [loading, setLoading] = useState(true);
+  const { connected } = useWebSocket();
   const [autoAdding, setAutoAdding] = useState(false);
   const [autoAdded, setAutoAdded] = useState(0);
+  const [autoError, setAutoError] = useState('');
 
-  const fetchStatus = async () => {
-    setLoading(true);
-    try {
-      const [h, cfg] = await Promise.all([
-        healthApi.check(),
-        fetch('/api/wallets/app/config').then(r => r.json()).then(r => r.data).catch(() => null),
-      ]);
-      setHealth(h);
-      if (cfg) setAppConfig(cfg);
-    } catch { /* ignore */ }
-    finally { setLoading(false); }
-  };
-
-  useEffect(() => { fetchStatus(); }, []);
-
-  const { connected } = useWebSocket();
-  // Si WebSocket connecté → backend OK → APIs configurées
-  const heliusOk  = connected;
-  const birdeyeOk = connected;
-  const walletOk  = connected && !!(health as Record<string, unknown> | null)?.traderWallet;
-
-  // Auto-add top 5 wallets that pass all filters
   async function handleAutoAdd() {
     setAutoAdding(true);
+    setAutoError('');
     try {
-      const traders = await discoverApi.topTraders({ timeframe: '7d', limit: '100' } as Record<string, string>);
+      const traders = await discoverApi.topTraders({ limit: '100' });
       const eligible = (traders as Array<{ address: string; passesFilters: boolean; isTracked: boolean; score: number }>)
-        .filter(t => t.passesFilters && !t.isTracked)
-        .sort((a, b) => b.score - a.score)
+        .filter(t => !t.isTracked)
+        .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
         .slice(0, 5);
 
+      if (eligible.length === 0) {
+        setAutoError('Aucun wallet disponible — clique sur Wallet Hunter pour en ajouter manuellement');
+        return;
+      }
       let count = 0;
       for (const t of eligible) {
-        await walletsApi.add(t.address, `Auto #${count + 1}`, ['auto', 'top-trader']);
+        await walletsApi.add(t.address, `Top Trader #${count + 1}`, ['auto']);
         count++;
       }
       setAutoAdded(count);
     } catch (e) {
-      console.error(e);
+      setAutoError('Erreur lors de l\'import — vérifie que le backend tourne');
     } finally {
       setAutoAdding(false);
     }
   }
 
-  const steps: Step[] = [
+  // Les 5 étapes — les 2 premières sont OK si WebSocket connecté
+  const steps = [
     {
       id: 1,
-      title: 'Helius connecté',
-      desc: 'API de tracking temps réel — transactions Solana en direct.',
-      done: heliusOk,
-      link: 'https://helius.dev',
-      linkLabel: 'helius.dev',
+      title: 'Helius API connecté',
+      desc: 'Tracking temps réel des transactions Solana.',
+      done: connected,
+      tag: connected ? '✓ Clé configurée' : 'Vérification...',
     },
     {
       id: 2,
-      title: 'Birdeye connecté',
-      desc: 'Prix des tokens, analytics wallets, leaderboard top traders.',
-      done: birdeyeOk,
-      link: 'https://birdeye.so',
-      linkLabel: 'birdeye.so',
+      title: 'Birdeye API connecté',
+      desc: 'Prix des tokens et leaderboard des top traders.',
+      done: connected,
+      tag: connected ? '✓ Clé configurée' : 'Vérification...',
     },
     {
       id: 3,
-      title: 'Wallet de trading configuré',
-      desc: 'Clé privée Phantom pour exécuter les copy trades automatiquement.',
-      done: walletOk,
-      action: () => {},
-      actionLabel: 'Ajouter dans .env → TRADER_PRIVATE_KEY',
+      title: 'Wallet Phantom (optionnel)',
+      desc: 'Nécessaire uniquement pour le copy trade automatique. Tu peux tracker et tester sans.',
+      done: false,
+      optional: true,
     },
     {
       id: 4,
-      title: 'Wallets alpha ajoutés',
-      desc: 'Importer automatiquement les meilleurs traders avec volume > $10k/j et actifs < 24h.',
+      title: 'Importer les wallets à copier',
+      desc: 'Trouve les 5 meilleurs traders actifs dans les dernières 24h.',
       done: autoAdded > 0,
-      action: handleAutoAdd,
-      actionLabel: autoAdding ? 'Import en cours...' : `Auto-importer les 5 meilleurs wallets`,
     },
     {
       id: 5,
-      title: 'Copy trade activé',
-      desc: 'Activer l\'auto-buy sur les wallets importés.',
+      title: 'Activer le copy trade',
+      desc: 'Configure l\'auto-buy sur les wallets importés.',
       done: false,
-      action: () => navigate('/copy-trade'),
-      actionLabel: 'Configurer le copy trade →',
     },
   ];
 
-  const completedCount = steps.filter(s => s.done).length;
-  const progress = Math.round((completedCount / steps.length) * 100);
+  const doneCount = steps.filter(s => s.done).length;
+  const pct = Math.round((doneCount / steps.length) * 100);
 
   return (
-    <div className="max-w-3xl mx-auto space-y-6">
+    <div className="max-w-2xl mx-auto space-y-5">
+
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-bold text-white flex items-center gap-2">
-            <Zap size={20} className="text-brand-400" />
-            Démarrage rapide
-          </h1>
-          <p className="text-sm text-gray-500 mt-0.5">
-            Suis ces étapes pour être opérationnel en moins de 5 minutes
-          </p>
-        </div>
-        <button onClick={fetchStatus} disabled={loading}
-          className="flex items-center gap-2 px-3 py-1.5 text-sm text-gray-400 hover:text-white bg-gray-800 hover:bg-gray-700 rounded-lg transition-colors">
-          <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
-          Vérifier
-        </button>
+      <div>
+        <h1 className="text-xl font-bold text-white flex items-center gap-2">
+          <Zap size={20} className="text-brand-400" />
+          Démarrage rapide
+        </h1>
+        <p className="text-sm text-gray-500 mt-0.5">Opérationnel en 5 minutes</p>
       </div>
 
-      {/* Progress bar */}
+      {/* Statut connexion */}
+      <div className={clsx(
+        'flex items-center gap-3 p-3 rounded-lg border text-sm',
+        connected
+          ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-300'
+          : 'bg-yellow-500/10 border-yellow-500/20 text-yellow-300'
+      )}>
+        <span className={clsx('w-2 h-2 rounded-full', connected ? 'bg-emerald-400' : 'bg-yellow-400')} />
+        {connected
+          ? 'Backend connecté — Helius et Birdeye actifs'
+          : 'Connexion en cours... (attends 3 secondes)'}
+      </div>
+
+      {/* Barre de progression */}
       <div className="card">
-        <div className="flex items-center justify-between mb-3">
-          <span className="text-sm font-medium text-gray-300">{completedCount}/{steps.length} étapes complétées</span>
-          <span className="text-sm font-bold text-brand-400">{progress}%</span>
+        <div className="flex justify-between text-sm mb-2">
+          <span className="text-gray-400">{doneCount}/{steps.length} étapes</span>
+          <span className="text-brand-400 font-bold">{pct}%</span>
         </div>
-        <div className="w-full h-2 bg-gray-800 rounded-full overflow-hidden">
-          <div
-            className="h-full bg-brand-500 rounded-full transition-all duration-500"
-            style={{ width: `${progress}%` }}
-          />
+        <div className="h-2 bg-gray-800 rounded-full overflow-hidden">
+          <div className="h-full bg-brand-500 rounded-full transition-all duration-500" style={{ width: `${pct}%` }} />
         </div>
       </div>
 
-      {/* Steps */}
+      {/* Étapes */}
       <div className="space-y-3">
-        {steps.map((step) => (
-          <div key={step.id} className={clsx(
-            'card transition-all',
-            step.done
-              ? 'border-emerald-500/20 bg-emerald-500/5'
-              : 'border-gray-800 hover:border-gray-700'
-          )}>
-            <div className="flex items-start gap-4">
-              <div className="shrink-0 mt-0.5">
-                {step.done
-                  ? <CheckCircle size={22} className="text-emerald-400" />
-                  : <Circle size={22} className="text-gray-600" />}
+
+        {/* Étape 1 */}
+        <div className={clsx('card', steps[0].done ? 'border-emerald-500/20' : '')}>
+          <div className="flex items-start gap-3">
+            {steps[0].done
+              ? <CheckCircle size={20} className="text-emerald-400 mt-0.5 shrink-0" />
+              : <Circle size={20} className="text-gray-600 mt-0.5 shrink-0" />}
+            <div className="flex-1">
+              <div className="flex items-center justify-between">
+                <span className={clsx('font-semibold text-sm', steps[0].done ? 'text-emerald-300' : 'text-white')}>
+                  Étape 1 — {steps[0].title}
+                </span>
+                {steps[0].done && <span className="badge-green text-xs">OK</span>}
               </div>
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center justify-between gap-2">
-                  <h3 className={clsx('font-semibold text-sm', step.done ? 'text-emerald-300 line-through opacity-70' : 'text-white')}>
-                    Étape {step.id} — {step.title}
-                  </h3>
-                  {!step.done && step.link && (
-                    <a href={step.link} target="_blank" rel="noopener noreferrer"
-                      className="flex items-center gap-1 text-xs text-brand-400 hover:text-brand-300 shrink-0">
-                      {step.linkLabel} <ExternalLink size={10} />
-                    </a>
-                  )}
-                </div>
-                <p className="text-xs text-gray-400 mt-0.5">{step.desc}</p>
-                {!step.done && step.action && (
-                  <button
-                    onClick={step.action}
-                    disabled={autoAdding}
-                    className="mt-3 flex items-center gap-2 px-4 py-2 bg-brand-500/10 hover:bg-brand-500/20 border border-brand-500/30 text-brand-400 rounded-lg text-xs font-medium transition-colors disabled:opacity-50"
-                  >
-                    {autoAdding && step.id === 4
-                      ? <RefreshCw size={12} className="animate-spin" />
-                      : <ArrowRight size={12} />}
-                    {step.actionLabel}
-                  </button>
-                )}
-                {step.id === 4 && autoAdded > 0 && (
-                  <p className="mt-2 text-xs text-emerald-400">
-                    ✓ {autoAdded} wallets importés avec succès
-                  </p>
-                )}
+              <p className="text-xs text-gray-400 mt-0.5">{steps[0].desc}</p>
+            </div>
+          </div>
+        </div>
+
+        {/* Étape 2 */}
+        <div className={clsx('card', steps[1].done ? 'border-emerald-500/20' : '')}>
+          <div className="flex items-start gap-3">
+            {steps[1].done
+              ? <CheckCircle size={20} className="text-emerald-400 mt-0.5 shrink-0" />
+              : <Circle size={20} className="text-gray-600 mt-0.5 shrink-0" />}
+            <div className="flex-1">
+              <div className="flex items-center justify-between">
+                <span className={clsx('font-semibold text-sm', steps[1].done ? 'text-emerald-300' : 'text-white')}>
+                  Étape 2 — {steps[1].title}
+                </span>
+                {steps[1].done && <span className="badge-green text-xs">OK</span>}
+              </div>
+              <p className="text-xs text-gray-400 mt-0.5">{steps[1].desc}</p>
+            </div>
+          </div>
+        </div>
+
+        {/* Étape 3 — Wallet (optionnel) */}
+        <div className="card border-gray-800">
+          <div className="flex items-start gap-3">
+            <Circle size={20} className="text-gray-600 mt-0.5 shrink-0" />
+            <div className="flex-1">
+              <div className="flex items-center gap-2">
+                <span className="font-semibold text-sm text-white">Étape 3 — {steps[2].title}</span>
+                <span className="badge-yellow text-xs">Optionnel</span>
+              </div>
+              <p className="text-xs text-gray-400 mt-0.5">{steps[2].desc}</p>
+              <div className="mt-2 text-xs text-gray-500 bg-gray-800 rounded-lg p-2 font-mono">
+                Phantom → Settings → Export Private Key → copie dans .env → TRADER_PRIVATE_KEY=...
               </div>
             </div>
           </div>
-        ))}
+        </div>
+
+        {/* Étape 4 — Import wallets */}
+        <div className={clsx('card', steps[3].done ? 'border-emerald-500/20' : 'border-brand-500/20')}>
+          <div className="flex items-start gap-3">
+            {steps[3].done
+              ? <CheckCircle size={20} className="text-emerald-400 mt-0.5 shrink-0" />
+              : <Zap size={20} className="text-brand-400 mt-0.5 shrink-0" />}
+            <div className="flex-1">
+              <span className="font-semibold text-sm text-white">Étape 4 — {steps[3].title}</span>
+              <p className="text-xs text-gray-400 mt-0.5">{steps[3].desc}</p>
+              {!steps[3].done && (
+                <div className="mt-3 flex flex-col gap-2">
+                  <button
+                    onClick={handleAutoAdd}
+                    disabled={autoAdding}
+                    className="btn-primary flex items-center gap-2 w-fit"
+                  >
+                    {autoAdding
+                      ? <><RefreshCw size={14} className="animate-spin" /> Import en cours...</>
+                      : <><Zap size={14} /> Auto-importer les 5 meilleurs wallets</>}
+                  </button>
+                  <button
+                    onClick={() => navigate('/hunter')}
+                    className="btn-ghost flex items-center gap-2 w-fit text-sm"
+                  >
+                    <ArrowRight size={14} /> Ou choisir manuellement dans Wallet Hunter
+                  </button>
+                  {autoError && (
+                    <div className="flex items-center gap-2 text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg p-2">
+                      <AlertCircle size={12} />
+                      {autoError}
+                    </div>
+                  )}
+                </div>
+              )}
+              {steps[3].done && (
+                <p className="text-xs text-emerald-400 mt-2">✓ {autoAdded} wallets importés et trackés</p>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Étape 5 — Copy trade */}
+        <div className="card border-brand-500/20">
+          <div className="flex items-start gap-3">
+            <Copy size={20} className="text-brand-400 mt-0.5 shrink-0" />
+            <div className="flex-1">
+              <span className="font-semibold text-sm text-white">Étape 5 — {steps[4].title}</span>
+              <p className="text-xs text-gray-400 mt-0.5">{steps[4].desc}</p>
+              <button
+                onClick={() => navigate('/copy-trade')}
+                className="mt-3 btn-primary flex items-center gap-2 w-fit"
+              >
+                <Copy size={14} /> Configurer le copy trade
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
 
-      {/* Budget & Tiers */}
-      {appConfig && (
-        <div className="card">
-          <h2 className="text-sm font-semibold text-gray-300 mb-4 flex items-center gap-2">
-            <Wallet size={16} className="text-brand-400" />
-            Budget & Paliers de position (€100 départ)
-          </h2>
-          <div className="grid grid-cols-3 gap-3 mb-4">
-            {appConfig.tiers.map((tier) => (
-              <div key={tier.tier} className={clsx(
-                'rounded-lg p-3 border text-center',
-                tier.tier === 1 ? 'border-blue-500/20 bg-blue-500/5' :
-                tier.tier === 2 ? 'border-yellow-500/20 bg-yellow-500/5' :
-                                  'border-emerald-500/20 bg-emerald-500/5'
-              )}>
-                <div className={clsx(
-                  'text-lg font-bold mono',
-                  tier.tier === 1 ? 'text-blue-400' :
-                  tier.tier === 2 ? 'text-yellow-400' : 'text-emerald-400'
-                )}>
-                  {tier.eur}€
-                </div>
-                <div className="text-xs text-gray-500 mt-0.5">
-                  ≈ {tier.sol.toFixed(3)} SOL
-                </div>
-                <div className="text-xs text-gray-400 mt-1 font-medium">
-                  {tier.tier === 1 ? 'Score < 70' : tier.tier === 2 ? 'Score 70–85' : 'Score > 85'}
-                </div>
-                <div className="text-xs text-gray-600 mt-0.5">
-                  {tier.tier === 1 ? 'Conservateur' : tier.tier === 2 ? 'Modéré' : 'Agressif'}
-                </div>
-              </div>
-            ))}
-          </div>
-          <div className="text-xs text-gray-500 border-t border-gray-800 pt-3 space-y-1">
-            <p>💡 Avec 100€ tu peux avoir <strong className="text-gray-300">jusqu'à 20 positions simultanées</strong> de 5€</p>
-            <p>📊 Volume min requis : <strong className="text-gray-300">${appConfig.filters.minDailyVolumeUsd.toLocaleString()}/j</strong></p>
-            <p>⏱ Dernière activité max : <strong className="text-gray-300">{appConfig.filters.maxLastActivityHours}h</strong></p>
-            <p>💧 Liquidité min : <strong className="text-gray-300">${appConfig.filters.minLiquidityUsd.toLocaleString()}</strong></p>
-          </div>
+      {/* Budget info */}
+      <div className="card bg-brand-500/5 border-brand-500/20">
+        <h3 className="text-sm font-semibold text-brand-300 mb-3 flex items-center gap-2">
+          <Wallet size={15} />
+          Budget €100 — Paliers automatiques
+        </h3>
+        <div className="grid grid-cols-3 gap-3 text-center">
+          {[
+            { tier: 'P1', eur: '5€', score: 'Score < 70', color: 'text-blue-400', bg: 'bg-blue-500/10 border-blue-500/20' },
+            { tier: 'P2', eur: '10€', score: 'Score 70–85', color: 'text-yellow-400', bg: 'bg-yellow-500/10 border-yellow-500/20' },
+            { tier: 'P3', eur: '15€', score: 'Score > 85', color: 'text-emerald-400', bg: 'bg-emerald-500/10 border-emerald-500/20' },
+          ].map(t => (
+            <div key={t.tier} className={clsx('rounded-lg p-3 border', t.bg)}>
+              <div className={clsx('text-lg font-bold', t.color)}>{t.eur}</div>
+              <div className="text-xs text-gray-500 mt-1">{t.score}</div>
+              <div className="text-xs font-bold text-gray-400 mt-1">{t.tier}</div>
+            </div>
+          ))}
         </div>
-      )}
+        <p className="text-xs text-gray-500 mt-3">
+          Slippage optimisé : 0.5% (haute liquidité) → 1% → 3% (faible liquidité) · Priority fee auto
+        </p>
+      </div>
 
-      {/* Slippage info */}
-      {appConfig && (
-        <div className="card">
-          <h2 className="text-sm font-semibold text-gray-300 mb-3 flex items-center gap-2">
-            <Zap size={16} className="text-yellow-400" />
-            Optimisation des frais & slippage
-          </h2>
-          <div className="grid grid-cols-3 gap-3 text-center text-xs">
-            {[
-              { label: 'Haute liquidité', threshold: '>$500k', bps: appConfig.slippage.highLiquidity, color: 'text-emerald-400' },
-              { label: 'Liquidité moyenne', threshold: '$50k–500k', bps: appConfig.slippage.medLiquidity, color: 'text-yellow-400' },
-              { label: 'Faible liquidité', threshold: '<$50k', bps: appConfig.slippage.lowLiquidity, color: 'text-red-400' },
-            ].map(s => (
-              <div key={s.label} className="bg-gray-800 rounded-lg p-3">
-                <div className={`text-lg font-bold mono ${s.color}`}>{(s.bps / 100).toFixed(1)}%</div>
-                <div className="text-gray-400 mt-0.5">{s.label}</div>
-                <div className="text-gray-600 mt-0.5">{s.threshold}</div>
-              </div>
-            ))}
-          </div>
-          <p className="text-xs text-gray-500 mt-3">
-            Le slippage est calculé dynamiquement selon la liquidité du pool. Priority fee adapté automatiquement au niveau de congestion du réseau.
-          </p>
-        </div>
-      )}
-
-      {/* CTA */}
-      {completedCount >= 4 && (
-        <div className="card border-brand-500/30 bg-brand-500/5 text-center">
-          <div className="text-2xl mb-2">🚀</div>
-          <h3 className="font-bold text-brand-300 mb-1">Tu es prêt à trader !</h3>
-          <p className="text-sm text-gray-400 mb-4">Tout est configuré. Active le copy trade et regarde les positions s'ouvrir automatiquement.</p>
-          <div className="flex gap-3 justify-center">
-            <button onClick={() => navigate('/copy-trade')} className="btn-primary flex items-center gap-2">
-              <Copy size={14} />
-              Activer le copy trade
-            </button>
-            <button onClick={() => navigate('/tracker')} className="btn-ghost flex items-center gap-2">
-              <Zap size={14} />
-              Voir le live tracker
-            </button>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
