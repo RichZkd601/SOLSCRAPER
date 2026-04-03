@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { CheckCircle, Circle, AlertCircle, Zap, Wallet, Search, Copy, ArrowRight, RefreshCw, ExternalLink } from 'lucide-react';
+import { CheckCircle, Circle, Zap, Wallet, Copy, ArrowRight, RefreshCw, ExternalLink } from 'lucide-react';
 import { clsx } from 'clsx';
 import { healthApi, walletsApi, discoverApi } from '../services/api';
+import { useWebSocket } from '../hooks/useWebSocket';
 
 interface Step {
   id: number;
@@ -35,16 +36,27 @@ export default function QuickStart() {
   const [autoAdding, setAutoAdding] = useState(false);
   const [autoAdded, setAutoAdded] = useState(0);
 
-  useEffect(() => {
-    Promise.all([
-      healthApi.check().then(setHealth).catch(() => {}),
-      fetch('/api/wallets/app/config').then(r => r.json()).then(r => setAppConfig(r.data)).catch(() => {}),
-    ]).finally(() => setLoading(false));
-  }, []);
+  const fetchStatus = async () => {
+    setLoading(true);
+    try {
+      const [h, cfg] = await Promise.all([
+        healthApi.check(),
+        fetch('/api/wallets/app/config').then(r => r.json()).then(r => r.data).catch(() => null),
+      ]);
+      setHealth(h);
+      if (cfg) setAppConfig(cfg);
+    } catch { /* ignore */ }
+    finally { setLoading(false); }
+  };
 
-  const heliusOk  = !!(health as Record<string, unknown> | null)?.helius;
-  const birdeyeOk = !!(health as Record<string, unknown> | null)?.birdeye;
-  const walletOk  = !!(health as Record<string, unknown> | null)?.traderWallet;
+  useEffect(() => { fetchStatus(); }, []);
+
+  const { connected } = useWebSocket();
+  // Backend is confirmed up if WS is connected OR health says so
+  const backendUp  = connected || health !== null;
+  const heliusOk   = backendUp && (health ? !!health.helius : connected);
+  const birdeyeOk  = backendUp && (health ? !!health.birdeye : connected);
+  const walletOk   = !!(health as Record<string, unknown> | null)?.traderWallet;
 
   // Auto-add top 5 wallets that pass all filters
   async function handleAutoAdd() {
@@ -118,14 +130,21 @@ export default function QuickStart() {
   return (
     <div className="max-w-3xl mx-auto space-y-6">
       {/* Header */}
-      <div>
-        <h1 className="text-xl font-bold text-white flex items-center gap-2">
-          <Zap size={20} className="text-brand-400" />
-          Démarrage rapide
-        </h1>
-        <p className="text-sm text-gray-500 mt-0.5">
-          Suis ces étapes pour être opérationnel en moins de 5 minutes
-        </p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-xl font-bold text-white flex items-center gap-2">
+            <Zap size={20} className="text-brand-400" />
+            Démarrage rapide
+          </h1>
+          <p className="text-sm text-gray-500 mt-0.5">
+            Suis ces étapes pour être opérationnel en moins de 5 minutes
+          </p>
+        </div>
+        <button onClick={fetchStatus} disabled={loading}
+          className="flex items-center gap-2 px-3 py-1.5 text-sm text-gray-400 hover:text-white bg-gray-800 hover:bg-gray-700 rounded-lg transition-colors">
+          <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+          Vérifier
+        </button>
       </div>
 
       {/* Progress bar */}
