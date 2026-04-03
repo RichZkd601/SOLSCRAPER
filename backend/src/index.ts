@@ -3,6 +3,8 @@ import cors from 'cors';
 import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import rateLimit from 'express-rate-limit';
+import path from 'path';
+import fs from 'fs';
 import { config } from './config';
 import { initDb } from './database/db';
 import { walletsRouter } from './routes/wallets';
@@ -22,7 +24,7 @@ app.use(express.json());
 // Rate limiting
 app.use('/api', rateLimit({ windowMs: 60_000, max: 200, standardHeaders: true, legacyHeaders: false }));
 
-// ─── Routes ───────────────────────────────────────────────────────────────────
+// ─── API Routes ───────────────────────────────────────────────────────────────
 app.use('/api/wallets', walletsRouter);
 app.use('/api/trades', tradesRouter);
 
@@ -36,6 +38,25 @@ app.get('/api/health', (_req, res) => {
     uptime: process.uptime(),
   });
 });
+
+// ─── Serve frontend build (production) ───────────────────────────────────────
+const frontendDist = path.resolve(__dirname, '../../frontend/dist');
+if (fs.existsSync(frontendDist)) {
+  app.use(express.static(frontendDist, {
+    maxAge: 0,
+    etag: false,
+    setHeaders: (res) => {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    },
+  }));
+  // SPA fallback — toutes les routes non-API renvoient index.html
+  app.get('*', (req, res) => {
+    if (!req.path.startsWith('/api') && !req.path.startsWith('/ws')) {
+      res.sendFile(path.join(frontendDist, 'index.html'));
+    }
+  });
+  console.log('[App] Serving frontend from:', frontendDist);
+}
 
 // ─── HTTP + WebSocket server ──────────────────────────────────────────────────
 const server = createServer(app);
@@ -82,9 +103,9 @@ server.listen(config.port, () => {
 ╔══════════════════════════════════════════════════╗
 ║          SOLSCRAPER — Solana Copy Trader         ║
 ╠══════════════════════════════════════════════════╣
-║  API:  http://localhost:${config.port}/api            ║
-║  WS:   ws://localhost:${config.port}/ws               ║
-║  Mode: ${config.nodeEnv.padEnd(42)}║
+║  URL: http://localhost:${config.port}                 ║
+║  API: http://localhost:${config.port}/api             ║
+║  WS:  ws://localhost:${config.port}/ws                ║
 ╚══════════════════════════════════════════════════╝
   `);
 });
